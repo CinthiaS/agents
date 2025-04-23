@@ -15,6 +15,18 @@ import numpy as np
 # Configurar o modelo
 llm = ChatOpenAI(api_key=os.getenv("OPENAI_API_KEY"), model="gpt-4-turbo")
 
+torch.manual_seed(42)
+class ImageProjector(nn.Module):
+    def __init__(self, input_dim=1000, output_dim=384):
+        super(ImageProjector, self).__init__()
+        self.projection = nn.Linear(input_dim, output_dim)
+
+    def forward(self, x):
+        return self.projection(x)
+
+projector = ImageProjector()
+
+
 # Carregar PDF e criar embeddings de texto
 def load_pdf_and_create_db(path):
     loader = PyPDFLoader(path)
@@ -76,3 +88,4 @@ if __name__ == "__main__":
 
     resposta = multimodal_rag_answer(docs, db, query_text, query_image_path)
     print("Resposta gerada:", resposta)
+
