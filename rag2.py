@@ -1,92 +1,55 @@
-# Instale as bibliotecas necessárias:
-# pip install langchain openai pypdf pillow torchvision sentence-transformers pdf2image faiss-cpu
-
-import os
-from langchain_openai import ChatOpenAI
-from langchain.schema import HumanMessage
-from pdf2image import convert_from_path
-from PIL import Image
-import torch
-from torch import nn
-from torchvision import models, transforms
+import pandas as pd
 import numpy as np
+import pymc as pm
 
-# Configurar o modelo de linguagem
-llm = ChatOpenAI(api_key=os.getenv("OPENAI_API_KEY"), model="gpt-4-turbo")
+# 1. Simular dados
+np.random.seed(42)
+n = 300
+setores = ['Indústria', 'Serviços', 'Financeiro']
+portes = ['Pequeno', 'Médio', 'Grande']
+mu_sigma = {
+    ('Indústria', 'Pequeno'): (2.5, 0.5),
+    ('Indústria', 'Médio'): (2.0, 0.4),
+    ('Indústria', 'Grande'): (1.5, 0.3),
+    ('Serviços', 'Pequeno'): (1.8, 0.3),
+    ('Serviços', 'Médio'): (1.6, 0.3),
+    ('Serviços', 'Grande'): (1.2, 0.2),
+    ('Financeiro', 'Pequeno'): (8.0, 1.0),
+    ('Financeiro', 'Médio'): (7.0, 0.8),
+    ('Financeiro', 'Grande'): (6.0, 0.6),
+}
+df = pd.DataFrame({
+    'setor': np.random.choice(setores, n),
+    'porte': np.random.choice(portes, n)
+})
+df['grupo'] = df['setor'] + '-' + df['porte']
+df['alavancagem'] = [np.random.normal(*mu_sigma[(s, p)]) for s, p in zip(df['setor'], df['porte'])]
 
-# Projeção linear para ajustar dimensão dos embeddings de imagem
-torch.manual_seed(42)
-class ImageProjector(nn.Module):
-    def __init__(self, input_dim=1000, output_dim=384):
-        super(ImageProjector, self).__init__()
-        self.projection = nn.Linear(input_dim, output_dim)
+# 2. Função para modelar cada grupo com PyMC
+def modelar_grupo(grupo_nome, grupo_df):
+    dados = grupo_df['alavancagem'].values
+    with pm.Model() as modelo:
+        mu = pm.Normal("mu", mu=np.mean(dados), sigma=1)
+        sigma = pm.HalfNormal("sigma", sigma=1)
+        obs = pm.Normal("obs", mu=mu, sigma=sigma, observed=dados)
+        trace = pm.sample(1000, tune=1000, chains=2, target_accept=0.9, progressbar=False)
+        pred = pm.sample_posterior_predictive(trace, var_names=["obs"], random_seed=42, progressbar=False)
 
-    def forward(self, x):
-        return self.projection(x)
+    amostras = pred["obs"].flatten()
+    q1 = np.percentile(amostras, 25)
+    q2 = np.percentile(amostras, 50)
+    q3 = np.percentile(amostras, 75)
+    return {
+        "grupo": grupo_nome,
+        "Q1 (Saudável)": round(q1, 2),
+        "Q2 (Aceitável)": round(q2, 2),
+        "Q3 (Ruim)": round(q3, 2),
+    }
 
-projector = ImageProjector()
+# 3. Aplicar modelagem a cada grupo
+resultados = []
+for grupo_nome, grupo_df in df.groupby('grupo'):
+    resultados.append(modelar_grupo(grupo_nome, grupo_df))
 
-# Extrair embeddings da imagem usando ResNet
-def extract_image_features(image):
-    model = models.resnet50(pretrained=True)
-    model.eval()
-
-    preprocess = transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(224),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
-
-    image = image.convert("RGB")
-    image_tensor = preprocess(image).unsqueeze(0)
-
-    with torch.no_grad():
-        features = model(image_tensor)
-
-    # Projeção linear para ajustar dimensão
-    projected_features = projector(features).squeeze()
-    return projected_features.numpy()
-
-# Converter PDF em imagens
-def pdf_to_images(pdf_path):
-    return convert_from_path(pdf_path)
-
-# Buscar a página mais similar usando embeddings de imagem
-def find_most_similar_page(pdf_images, query_image_path):
-    query_image = Image.open(query_image_path)
-    query_embedding = extract_image_features(query_image)
-
-    similarities = []
-    for page_image in pdf_images:
-        page_embedding = extract_image_features(page_image)
-        similarity = np.dot(query_embedding, page_embedding) / (np.linalg.norm(query_embedding) * np.linalg.norm(page_embedding))
-        similarities.append(similarity)
-
-    most_similar_index = np.argmax(similarities)
-    return most_similar_index, pdf_images[most_similar_index]
-
-# Gerar resposta baseada na página mais similar
-def multimodal_rag_answer(pdf_images, query_image_path, query_text):
-    page_index, similar_page_image = find_most_similar_page(pdf_images, query_image_path)
-
-    # Aqui poderia usar OCR para extrair texto da imagem se quiser combinar com texto
-    # Mas neste exemplo, apenas informamos a página encontrada
-
-    messages = [
-        HumanMessage(content=f"Encontrei a página {page_index + 1} mais parecida com a imagem fornecida. Descreva o conteúdo desta página com base na pergunta: {query_text}.")
-    ]
-
-    response = llm.invoke(messages)
-    return response.content
-
-# Exemplo de uso
-if __name__ == "__main__":
-    pdf_path = "seu_documento.pdf"
-    query_image_path = "imagem_tabela.png"
-    query_text = "Descreva o conteúdo desta tabela."
-
-    pdf_images = pdf_to_images(pdf_path)
-
-    resposta = multimodal_rag_answer(pdf_images, query_image_path, query_text)
-    print("Resposta gerada:", resposta)
+resultados_df = pd.DataFrame(resultados)
+print(resultados_df)
