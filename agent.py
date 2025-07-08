@@ -92,6 +92,74 @@ state = {
 }
 
 resultado_final = asyncio.run(app.ainvoke(state))
-resultado_final['contas'].to_excel('resultado_ativo_circulante.xlsx', index=False)
+resultado_final['contas'].to_excel('resultado_ativo_circulante.xlsx', index=False
 
-print("Planilha preenchida com sucesso!")
+
+
+
+from langgraph.graph import StateGraph, END
+from langchain.chat_models import ChatOpenAI
+from langchain_core.runnables import RunnableLambda
+from typing import TypedDict, Optional
+
+# Estado da conversa
+class WorkflowState(TypedDict):
+    empresa: str
+    ponto_de_atencao: Optional[str]
+    analise_final: Optional[str]
+
+# LLM base
+llm = ChatOpenAI(model="gpt-4", temperature=0.2)
+
+# ------------------- AGENTE ANALISTA 1 -------------------
+def agente_analista_1(state: WorkflowState) -> WorkflowState:
+    empresa = state["empresa"]
+    
+    prompt = f"""
+Você é um analista financeiro. Avalie o seguinte texto sobre uma empresa e diga se há algum ponto de atenção.
+Se houver, explique em uma frase. Caso contrário, diga "Nenhum ponto de atenção encontrado".
+
+Texto: "{empresa}"
+"""
+    resposta = llm.invoke(prompt).content.strip()
+    
+    if "nenhum ponto" in resposta.lower():
+        return {"empresa": empresa, "ponto_de_atencao": None}
+    else:
+        return {"empresa": empresa, "ponto_de_atencao": resposta}
+
+# ------------------- SUPERVISOR -------------------
+def supervisor(state: WorkflowState) -> str:
+    if state.get("ponto_de_atencao"):
+        return "chamar_analista_2"
+    return END
+
+# ------------------- AGENTE ANALISTA 2 -------------------
+def agente_analista_2(state: WorkflowState) -> WorkflowState:
+    ponto = state["ponto_de_atencao"]
+    
+    prompt = f"""
+Você é um analista sênior de riscos. O seguinte ponto de atenção foi identificado:
+"{ponto}"
+
+Faça uma análise mais aprofundada desse ponto de atenção, considerando possíveis causas e consequências para a empresa.
+"""
+    resposta = llm.invoke(prompt).content.strip()
+    return {"analise_final": resposta}
+
+# ------------------- CONSTRUÇÃO DO GRAFO -------------------
+graph = StateGraph(WorkflowState)
+
+graph.add_node("analista_1", RunnableLambda(agente_analista_1))
+graph.add_node("supervisor", RunnableLambda(supervisor))
+graph.add_node("analista_2", RunnableLambda(agente_analista_2))
+
+graph.set_entry_point("analista_1")
+graph.add_edge("analista_1", "supervisor")
+graph.add_conditional_edges("supervisor", {
+    "chamar_analista_2": "analista_2",
+    END: END
+})
+graph.add_edge("analista_2", END)
+
+workflow = graph.compile()
